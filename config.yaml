@@ -1,0 +1,22 @@
+# Default output files.
+markdown: siliconflow_prices.md
+debug_json: siliconflow_raw.json
+# csv: siliconflow_prices.csv
+
+# Pricing source. The public pricing page embeds the model pricing payload, so
+# no API key or logged-in browser cookie is needed for the default table.
+pricing_url: "https://siliconflow.cn/pricing"
+
+# Network behavior.
+timeout: 8
+use_env_proxy: false
+
+# Optional authenticated/API overrides. These are not needed for the default
+# public pricing-page extraction.
+# browser_cookies: false
+# cookie: "paste Cookie header here"
+# cookie_file: "/path/to/exported-cookies.txt"
+# api_key: "sk-..."
+# endpoints:
+#   - "https://cloud.siliconflow.cn/api/v1/models/pricing"
+#   - "https://cloud.siliconflow.cn/api/v1/models"
