@@ -1,6 +1,6 @@
 # Default output files.
-markdown: siliconflow_prices.md
-debug_json: siliconflow_raw.json
+markdown: siliconflow_cn_prices.md
+debug_json: siliconflow_cn_raw.json
 # csv: siliconflow_prices.csv
 
 # Pricing source. The public pricing page embeds the model pricing payload, so
