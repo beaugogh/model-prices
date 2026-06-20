@@ -1,6 +1,7 @@
 import argparse
 import csv
 import html
+import io
 import json
 import os
 import re
@@ -10,6 +11,20 @@ from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from http.cookiejar import MozillaCookieJar
 from typing import Any, Iterable
+
+# Use system certificate store for SSL (fixes corporate proxy issues)
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass  # truststore not installed, use default SSL handling
+
+# Force UTF-8 output on Windows to handle Chinese characters and ¥ symbol
+if sys.platform == "win32":
+    if not isinstance(sys.stdout, io.TextIOWrapper) or sys.stdout.encoding.lower() != "utf-8":
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if not isinstance(sys.stderr, io.TextIOWrapper) or sys.stderr.encoding.lower() != "utf-8":
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import requests
 
@@ -36,12 +51,35 @@ INPUT_PRICE_KEYS = ("input_price", "inputPrice", "prompt_price", "promptPrice", 
 OUTPUT_PRICE_KEYS = ("output_price", "outputPrice", "completion_price", "completionPrice", "output", "completion")
 DEFAULT_CONFIG_PATH = "config.yaml"
 
+# Type ordering for sorting
+TYPE_ORDER = {
+    "chat": 0,
+    "text-to-image": 1,
+    "text-to-video": 2,
+    "image-to-video": 3,
+    "text-to-speech": 4,
+    "speech-to-text": 5,
+    "embedding": 6,
+    "reranker": 7,
+}
+
+# Models to exclude from output
+EXCLUDED_MODELS = {
+    "DeepSeek-R1",
+    "DeepSeek-V3",
+    "DeepSeek-V3.1-Terminus",
+    "DeepSeek-V3.2",
+    "Qwen2.5-7B-Instruct",
+}
+
 
 @dataclass
 class ModelPrice:
+    org: str
     model_id: str
     category: str
     context: str
+    pricing_unit: str
     cache_hit: str
     input_price: str
     output_price: str
@@ -417,9 +455,9 @@ def format_context(value: Any) -> str:
     if context <= 0:
         return "N/A"
     if context >= 1_000_000:
-        return f"{context / Decimal(1_000_000):g}M"
+        return f"{float(context / Decimal(1_000_000)):.1f}M"
     if context >= 1_000:
-        return f"{context / Decimal(1_000):g}k"
+        return f"{float(context / Decimal(1_000)):.1f}K"
     return f"{context:g}"
 
 
@@ -556,7 +594,7 @@ def normalize_pricing_page_models(payload: dict[str, Any]) -> list[ModelPrice]:
     ):
         payload_models = [
             model
-            for key in ("chats", "images", "audios", "videos")
+            for key in ("chats", "embeddings", "images", "audios", "videos")
             for model in payload.get(key, [])
             if isinstance(model, dict)
         ]
@@ -564,61 +602,134 @@ def normalize_pricing_page_models(payload: dict[str, Any]) -> list[ModelPrice]:
     for model in payload_models or []:
         if not isinstance(model, dict):
             continue
-        if model.get("type") != "text" or model.get("subType") not in ("chat", "embedding", "reranker"):
+
+        model_type = model.get("type")
+        sub_type = model.get("subType")
+
+        # Determine pricing unit based on model type
+        if model_type == "text" and sub_type in ("chat", "embedding", "reranker"):
+            pricing_unit = "1M tokens"
+            items = model_pricing_items(model, index)
+            input_price = component_prices(items, "input-tokens")
+            output_price = component_prices(items, "output-tokens")
+            cache_price = component_prices(items, "cached-input-tokens")
+
+            if input_price == "N/A":
+                input_price = format_yuan(model_spec_price(model, "prompt") or model.get("inputPrice"))
+            if output_price == "N/A":
+                output_price = format_yuan(model_spec_price(model, "completion") or model.get("price"))
+        elif model_type == "image":
+            pricing_unit = "per image"
+            items = model_pricing_items(model, index)
+            input_price = component_prices(items, "image-cnt")
+            output_price = "N/A"
+            cache_price = "N/A"
+        elif model_type == "video":
+            pricing_unit = "per video"
+            items = model_pricing_items(model, index)
+            input_price = component_prices(items, "video-cnt")
+            output_price = "N/A"
+            cache_price = "N/A"
+        elif model_type == "audio":
+            pricing_unit = "1K chars"
+            items = model_pricing_items(model, index)
+            input_price = component_prices(items, "utf8-bytes")
+            output_price = "N/A"
+            cache_price = "N/A"
+        else:
             continue
 
-        items = model_pricing_items(model, index)
-        input_price = component_prices(items, "input-tokens")
-        output_price = component_prices(items, "output-tokens")
-        cache_price = component_prices(items, "cached-input-tokens")
+        model_id = str(model.get("modelName") or model.get("targetModelName") or model.get("DisplayName") or "Unknown")
+        parts = model_id.split("/")
+        if len(parts) >= 3:
+            # Handle Pro/org/model-name format
+            org = "/".join(parts[:-1])
+            model_name = parts[-1]
+        elif len(parts) == 2:
+            org = parts[0]
+            model_name = parts[1]
+        else:
+            org = ""
+            model_name = model_id
 
-        if input_price == "N/A":
-            input_price = format_yuan(model_spec_price(model, "prompt") or model.get("inputPrice"))
-        if output_price == "N/A":
-            output_price = format_yuan(model_spec_price(model, "completion") or model.get("price"))
+        # Skip excluded models
+        if model_name in EXCLUDED_MODELS:
+            continue
 
         rows.append(
             ModelPrice(
-                model_id=str(model.get("modelName") or model.get("targetModelName") or model.get("DisplayName") or "Unknown"),
-                category=str(model.get("subType") or model.get("type") or "text"),
+                org=org,
+                model_id=model_name,
+                category=str(sub_type or model_type or "text"),
                 context=format_context(model.get("contextLen")),
+                pricing_unit=pricing_unit,
                 cache_hit=cache_price,
                 input_price=input_price,
                 output_price=output_price,
             )
         )
 
-    return sorted(rows, key=lambda row: row.model_id.lower())
+    return sorted(rows, key=lambda row: (
+        TYPE_ORDER.get(row.category, 99),
+        row.org.lower(),
+        row.model_id.lower(),
+        row.input_price,
+        row.output_price
+    ))
 
 
 def normalize_models(models: list[dict[str, Any]]) -> list[ModelPrice]:
     rows = []
     for model in models:
         flat = flatten(model)
+        model_id = str(pick(flat, MODEL_ID_KEYS) or "Unknown")
+        parts = model_id.split("/")
+        if len(parts) >= 3:
+            org = "/".join(parts[:-1])
+            model_name = parts[-1]
+        elif len(parts) == 2:
+            org = parts[0]
+            model_name = parts[1]
+        else:
+            org = ""
+            model_name = model_id
+
+        # Skip excluded models
+        if model_name in EXCLUDED_MODELS:
+            continue
+
         rows.append(
             ModelPrice(
-                model_id=str(pick(flat, MODEL_ID_KEYS) or "Unknown"),
+                org=org,
+                model_id=model_name,
                 category=str(pick(flat, ("category", "type", "subType")) or "N/A"),
                 context=format_context(pick(flat, CONTEXT_KEYS)),
+                pricing_unit="1M tokens",
                 cache_hit=format_price(pick(flat, CACHE_PRICE_KEYS)),
                 input_price=format_price(pick(flat, INPUT_PRICE_KEYS)),
                 output_price=format_price(pick(flat, OUTPUT_PRICE_KEYS)),
             )
         )
-    return sorted(rows, key=lambda row: row.model_id.lower())
+    return sorted(rows, key=lambda row: (
+        TYPE_ORDER.get(row.category, 99),
+        row.org.lower(),
+        row.model_id.lower(),
+        row.input_price,
+        row.output_price
+    ))
 
 
 def markdown_table(rows: list[ModelPrice], source: str) -> str:
     lines = [
         f"Source: {source}",
         "",
-        "| Model ID | Type | Context Window | Cache Hit / 1M tokens | Input / 1M tokens | Output / 1M tokens |",
-        "|---|---|---:|---:|---:|---:|",
+        "| Org | Model ID | Type | Context | Unit | Cache | Input | Output |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
-            f"| {row.model_id} | {row.category} | {row.context} | {row.cache_hit} | "
-            f"{row.input_price} | {row.output_price} |"
+            f"| {row.org} | {row.model_id} | {row.category} | {row.context} | {row.pricing_unit} | "
+            f"{row.cache_hit} | {row.input_price} | {row.output_price} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -630,9 +741,9 @@ def print_markdown_table(rows: list[ModelPrice], source: str) -> None:
 def write_csv(rows: list[ModelPrice], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["Model ID", "Type", "Context Window", "Cache Hit / 1M", "Input / 1M", "Output / 1M"])
+        writer.writerow(["Org", "Model ID", "Type", "Context", "Unit", "Cache", "Input", "Output"])
         for row in rows:
-            writer.writerow([row.model_id, row.category, row.context, row.cache_hit, row.input_price, row.output_price])
+            writer.writerow([row.org, row.model_id, row.category, row.context, row.pricing_unit, row.cache_hit, row.input_price, row.output_price])
 
 
 def write_markdown(rows: list[ModelPrice], source: str, path: str) -> None:

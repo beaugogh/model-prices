@@ -12942,9 +12942,9 @@
       "unitZhCnName": "K tokens"
     },
     {
-      "playgroundName": "BAAI/bge-large-zh-v1.5",
+      "playgroundName": "BAAI/bge-large-en-v1.5",
       "playgroundSort": 18010,
-      "payloadId": 17885303076,
+      "payloadId": 17885303075,
       "skuId": 13127,
       "payloadBiz": 18010,
       "payloadBizText": "online",
@@ -12960,9 +12960,9 @@
       "unitZhCnName": "K tokens"
     },
     {
-      "playgroundName": "BAAI/bge-large-en-v1.5",
+      "playgroundName": "BAAI/bge-large-zh-v1.5",
       "playgroundSort": 18010,
-      "payloadId": 17885303075,
+      "payloadId": 17885303076,
       "skuId": 13127,
       "payloadBiz": 18010,
       "payloadBizText": "online",
